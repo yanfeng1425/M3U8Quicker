@@ -1,5 +1,5 @@
 import { t, useTranslation } from "../i18n";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -49,19 +49,23 @@ export function UpdateModal({ open, onClose, onChecked }: UpdateModalProps) {
   const [installerPath, setInstallerPath] = useState("");
   const [openingInstaller, setOpeningInstaller] = useState(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
+  const checkRequestIdRef = useRef(0);
+  const checkOnOpen = useEffectEvent(() => { void runCheck(); });
 
   useEffect(() => {
     if (!open) {
       return;
     }
-    void runCheck();
+    checkOnOpen();
     return () => {
+      checkRequestIdRef.current += 1;
       unlistenRef.current?.();
       unlistenRef.current = null;
     };
   }, [open]);
 
   const runCheck = async () => {
+    const requestId = ++checkRequestIdRef.current;
     setPhase("checking");
     setErrorText("");
     setInfo(null);
@@ -72,6 +76,7 @@ export function UpdateModal({ open, onClose, onChecked }: UpdateModalProps) {
 
     try {
       const result = await checkForUpdate();
+      if (requestId !== checkRequestIdRef.current) return;
       setInfo(result);
       onChecked?.(result);
       if (!result.has_update) {
@@ -82,6 +87,7 @@ export function UpdateModal({ open, onClose, onChecked }: UpdateModalProps) {
         setPhase("has-update");
       }
     } catch (error) {
+      if (requestId !== checkRequestIdRef.current) return;
       setErrorText(formatError(error));
       setPhase("error");
     }

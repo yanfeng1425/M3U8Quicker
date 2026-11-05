@@ -1,5 +1,5 @@
 import { t, useTranslation } from "./i18n";
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import {
   Button,
   Layout,
@@ -866,6 +866,22 @@ function App({
     },
   ];
 
+  const closeNewDownload = useCallback(() => setModalOpen(false), []);
+  const openDownloadFfmpegSettings = useCallback(() => {
+    setSettingsInitialTab("ffmpeg");
+    setSettingsOpen(true);
+  }, []);
+  const switchDownloadToLive = useCallback((draft: { url: string; extraHeaders?: string; filename?: string; outputDir?: string }) => {
+    setModalOpen(false);
+    setDownloadDraft(null);
+    setLiveRecordDraft({ ...draft, nonce: Date.now() });
+    setLiveRecordModalOpen(true);
+  }, []);
+  const submitNewDownload = useCallback(async (params: Parameters<typeof addDownload>[0]) => {
+    await addDownload(params);
+    setModalOpen(false);
+  }, [addDownload]);
+
   return (
     <Layout style={{ minHeight: "100vh", background: token.colorBgLayout }}>
       <Header
@@ -934,21 +950,10 @@ function App({
         initialExtraHeaders={downloadDraft?.extraHeaders}
         initialFileType={downloadDraft?.fileType}
         resetKey={downloadDraft?.nonce ?? 0}
-        onClose={() => setModalOpen(false)}
-        onOpenFfmpegSettings={() => {
-          setSettingsInitialTab("ffmpeg");
-          setSettingsOpen(true);
-        }}
-        onSwitchToLiveRecord={(draft) => {
-          setModalOpen(false);
-          setDownloadDraft(null);
-          setLiveRecordDraft({ ...draft, nonce: Date.now() });
-          setLiveRecordModalOpen(true);
-        }}
-        onSubmit={async (params) => {
-          await addDownload(params);
-          setModalOpen(false);
-        }}
+        onClose={closeNewDownload}
+        onOpenFfmpegSettings={openDownloadFfmpegSettings}
+        onSwitchToLiveRecord={switchDownloadToLive}
+        onSubmit={submitNewDownload}
       />
       <SettingsModal
         open={settingsOpen}

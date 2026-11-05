@@ -3103,18 +3103,17 @@ async fn start_download_worker(
                 let _ = persistence::save_task(&app_handle, &task).await;
             }
         }
-        if remove_from_runtime {
+        let final_status = {
             let mut downloads = state_downloads.lock().await;
-            downloads.remove(&task_id);
-        }
+            let status = downloads.get(&task_id).map(|task| task.status.clone());
+            if remove_from_runtime {
+                downloads.remove(&task_id);
+            }
+            status
+        };
         if let Some(progress) = progress_to_emit {
             let _ = app_handle.emit("download-progress", &progress);
         }
-
-        let final_status = {
-            let downloads = state_downloads.lock().await;
-            downloads.get(&task_id).map(|task| task.status.clone())
-        };
 
         if !matches!(final_status, Some(DownloadStatus::Downloading)) {
             let mut tokens = state_cancel_tokens.lock().await;

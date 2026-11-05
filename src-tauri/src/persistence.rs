@@ -138,9 +138,6 @@ where
     tokio::fs::write(&temp_path, json)
         .await
         .map_err(|error| AppError::Internal(error.to_string()))?;
-    if path.exists() {
-        let _ = tokio::fs::remove_file(path).await;
-    }
     tokio::fs::rename(&temp_path, path)
         .await
         .map_err(|error| AppError::Internal(error.to_string()))
@@ -346,7 +343,9 @@ pub async fn migrate_legacy_downloads(app_handle: &tauri::AppHandle) -> Result<(
     let data = tokio::fs::read_to_string(&legacy_path)
         .await
         .map_err(|error| AppError::Internal(error.to_string()))?;
-    let tasks: Vec<DownloadTask> = serde_json::from_str(&data).unwrap_or_default();
+    // A corrupt legacy file must not overwrite the current task indexes.
+    let tasks: Vec<DownloadTask> = serde_json::from_str(&data)
+        .map_err(|error| AppError::Internal(error.to_string()))?;
 
     let mut active = Vec::new();
     let mut history = Vec::new();
@@ -627,6 +626,22 @@ async fn save_settings_at(path: &Path, settings: &AppSettings) -> Result<(), App
 mod settings_tests {
     use super::*;
     use crate::i18n::AppLanguage;
+
+    #[tokio::test]
+    async fn task_json_replacement_and_failed_write_preserve_valid_data() {
+        let root = std::env::temp_dir().join(format!("m3u8quicker-atomic-{}", uuid::Uuid::new_v4()));
+        let path = root.join("task.json");
+        write_json_atomic(&path, &vec![1]).await.unwrap();
+        write_json_atomic(&path, &vec![2, 3]).await.unwrap();
+        let saved: Vec<u32> = read_json_required(&path).await.unwrap();
+        assert_eq!(saved, vec![2, 3]);
+
+        tokio::fs::create_dir(path.with_extension("tmp")).await.unwrap();
+        assert!(write_json_atomic(&path, &vec![4]).await.is_err());
+        let saved: Vec<u32> = read_json_required(&path).await.unwrap();
+        assert_eq!(saved, vec![2, 3]);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 
     #[tokio::test]
     async fn https_certificate_setting_persists_both_values_without_changing_other_settings() {

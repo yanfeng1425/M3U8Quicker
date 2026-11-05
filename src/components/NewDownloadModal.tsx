@@ -1,5 +1,5 @@
 import { t, useTranslation } from "../i18n";
-import { useState, useEffect } from "react";
+import { memo, useState, useEffect } from "react";
 import { Modal, Form, Input, Button, Space, Radio, Typography, message } from "antd";
 import { FolderOpenOutlined, PictureOutlined } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -45,7 +45,7 @@ interface NewDownloadModalProps {
   onSubmit: (params: CreateDownloadParams) => Promise<void>;
 }
 
-export function NewDownloadModal({
+export const NewDownloadModal = memo(function NewDownloadModal({
   open: isOpen,
   initialUrl,
   initialExtraHeaders,
@@ -529,7 +529,7 @@ export function NewDownloadModal({
       </Modal>
     </Modal>
   );
-}
+});
 
 interface HlsTrackSelectionContentProps {
   inspection: InspectHlsTracksResult;

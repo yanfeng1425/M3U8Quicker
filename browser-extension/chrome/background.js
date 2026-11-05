@@ -6,6 +6,10 @@ const STREAM_MANIFEST_REQUEST_FILTERS = ["*://*/*.m3u8*", "*://*/*.mpd*", "*://*
 const MAX_PENDING_DETECTIONS = 100;
 const pendingDetectionsByTab = new Map();
 
+chrome.tabs.onRemoved.addListener((tabId) => {
+  pendingDetectionsByTab.delete(tabId);
+});
+
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (!shouldTrackRequest(details)) {

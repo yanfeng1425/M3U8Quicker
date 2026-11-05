@@ -1,6 +1,6 @@
 import { t, useTranslation } from "../i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useProgressEvent } from "./useProgressEvent";
 import { message } from "antd";
 import type {
   CreateLiveRecordParams,
@@ -159,38 +159,27 @@ export function useLiveRecords(historyPageSize = DEFAULT_PAGE_SIZE) {
     };
   }, [historyPageSize]);
 
-  useEffect(() => {
-    let unlisten: UnlistenFn | undefined;
-
-    listen<LiveProgressEvent>("live-progress", (event) => {
-      const progress = event.payload;
-      if (progress.group === "active") {
-        setActivePage((prev) => patchPageItem(prev, progress).nextPage);
-        return;
-      }
-      // Item flipped to history. Remove from active and refresh both groups.
-      setActivePage((prev) => ({
-        ...prev,
-        items: prev.items.filter((item) => item.id !== progress.id),
-        total: Math.max(0, prev.total - 1),
-      }));
-      void refreshCounts().catch((error) => {
-        console.error("Failed to refresh live counts", error);
-      });
-      void refreshGroup("active").catch((error) => {
-        console.error("Failed to refresh active lives", error);
-      });
-      void refreshGroup("history").catch((error) => {
-        console.error("Failed to refresh history lives", error);
-      });
-    }).then((fn) => {
-      unlisten = fn;
+  useProgressEvent<LiveProgressEvent>("live-progress", (progress) => {
+    if (progress.group === "active") {
+      setActivePage((prev) => patchPageItem(prev, progress).nextPage);
+      return;
+    }
+    // Item flipped to history. Remove from active and refresh both groups.
+    setActivePage((prev) => ({
+      ...prev,
+      items: prev.items.filter((item) => item.id !== progress.id),
+      total: Math.max(0, prev.total - 1),
+    }));
+    void refreshCounts().catch((error) => {
+      console.error("Failed to refresh live counts", error);
     });
-
-    return () => {
-      unlisten?.();
-    };
-  }, [refreshCounts, refreshGroup]);
+    void refreshGroup("active").catch((error) => {
+      console.error("Failed to refresh active lives", error);
+    });
+    void refreshGroup("history").catch((error) => {
+      console.error("Failed to refresh history lives", error);
+    });
+  });
 
   const addLiveRecord = useCallback(
     async (params: CreateLiveRecordParams) => {

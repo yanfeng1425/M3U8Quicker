@@ -1,6 +1,6 @@
 import { t, useTranslation } from "../i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useDownloadProgress } from "./useDownloadProgress";
 import { message, Modal } from "antd";
 import type {
   CreateDownloadParams,
@@ -114,6 +114,8 @@ export function useDownloads(historyPageSize = DEFAULT_PAGE_SIZE) {
     Record<string, DownloadTaskSegmentState>
   >({});
   const historyRequestIdRef = useRef(0);
+  const pagesRef = useRef({ active: activePage, history: historyPage });
+  useEffect(() => { pagesRef.current = { active: activePage, history: historyPage }; }, [activePage, historyPage]);
 
   const refreshCounts = useCallback(async () => {
     const nextCounts = await api.getDownloadCounts();
@@ -124,7 +126,7 @@ export function useDownloads(historyPageSize = DEFAULT_PAGE_SIZE) {
   const refreshGroup = useCallback(async (group: DownloadGroup, page?: number) => {
     setLoadingGroups((prev) => ({ ...prev, [group]: true }));
     try {
-      const currentPage = group === "active" ? activePage : historyPage;
+      const currentPage = pagesRef.current[group];
       const pageSize =
         group === "history" ? historyPageSize : currentPage.pageSize;
       const nextPage = await api.getDownloadsPage(
@@ -142,7 +144,7 @@ export function useDownloads(historyPageSize = DEFAULT_PAGE_SIZE) {
     } finally {
       setLoadingGroups((prev) => ({ ...prev, [group]: false }));
     }
-  }, [activePage, historyPage, historyPageSize]);
+  }, [historyPageSize]);
 
   useEffect(() => {
     let disposed = false;
@@ -200,45 +202,31 @@ export function useDownloads(historyPageSize = DEFAULT_PAGE_SIZE) {
     };
   }, [historyPageSize]);
 
-  useEffect(() => {
-    let unlisten: UnlistenFn | undefined;
-
-    listen<DownloadProgressEvent>("download-progress", (event) => {
-      const progress = event.payload;
-      setSegmentStateCache((prev) => {
-        const next = { ...prev };
-        delete next[progress.id];
-        return next;
-      });
-
-      if (progress.group === "active") {
-        setActivePage((prev) => patchPageItem(prev, progress).nextPage);
-        return;
-      }
-
-      setActivePage((prev) => ({
-        ...prev,
-        items: prev.items.filter((item) => item.id !== progress.id),
-        total: Math.max(0, prev.total - 1),
-      }));
-
-      void refreshCounts().catch((error) => {
-        console.error("Failed to refresh download counts", error);
-      });
-      void refreshGroup("active").catch((error) => {
-        console.error("Failed to refresh active downloads", error);
-      });
-      void refreshGroup("history").catch((error) => {
-        console.error("Failed to refresh history downloads", error);
-      });
-    }).then((fn) => {
-      unlisten = fn;
+  useDownloadProgress((events) => {
+    const byId = new Map(events.map((event) => [event.id, event]));
+    setSegmentStateCache((prev) => {
+      const ids = events.filter((event) => event.id in prev).map((event) => event.id);
+      if (!ids.length) return prev;
+      const next = { ...prev };
+      for (const id of ids) delete next[id];
+      return next;
     });
-
-    return () => {
-      unlisten?.();
-    };
-  }, [refreshCounts, refreshGroup]);
+    setActivePage((prev) => {
+      let changed = false;
+      const items = prev.items.flatMap((item) => {
+        const progress = byId.get(item.id);
+        if (!progress) return [item];
+        changed = true;
+        if (progress.group !== "active") return [];
+        return patchPageItem({ ...prev, items: [item] }, progress).nextPage.items;
+      });
+      return changed ? { ...prev, items, total: Math.max(0, prev.total - (prev.items.length - items.length)) } : prev;
+    });
+    if (!events.some((event) => event.group === "history")) return;
+    void refreshCounts().catch((error) => console.error("Failed to refresh download counts", error));
+    void refreshGroup("active").catch((error) => console.error("Failed to refresh active downloads", error));
+    void refreshGroup("history").catch((error) => console.error("Failed to refresh history downloads", error));
+  });
 
   const addDownload = useCallback(async (params: CreateDownloadParams) => {
     const task = await api.createDownload(params);

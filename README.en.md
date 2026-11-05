@@ -144,7 +144,7 @@ The settings panel includes:
 
 ### Requirements
 
-- Node.js: a recent LTS version is recommended.
+- Node.js: 24 LTS is recommended (see `.nvmrc`); supported versions are 20.19+ or 22.13+.
 - Rust: version `1.88` or later.
 
 ### Project structure

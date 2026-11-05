@@ -144,7 +144,7 @@ user-agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)
 
 ### 环境要求
 
-- Node.js：建议使用较新的 LTS 版本
+- Node.js：推荐 24 LTS（见 `.nvmrc`）；支持 20.19+ 或 22.13+
 - Rust：最低 `1.88`
 
 ### 目录结构
