@@ -18,8 +18,10 @@ use crate::playback::{
 use crate::preview::PreviewSession;
 
 pub struct AppState {
+    pub batch_handoff: Arc<crate::batch_handoff::BatchHandoff>,
     pub downloads: Arc<Mutex<HashMap<DownloadId, DownloadTask>>>,
     pub download_store_lock: Arc<Mutex<()>>,
+    pub batch_creation_locks: [Mutex<()>; 64],
     pub cancel_tokens: Arc<Mutex<HashMap<DownloadId, CancellationToken>>>,
     pub live_records: Arc<Mutex<HashMap<DownloadId, LiveRecordTask>>>,
     pub live_store_lock: Arc<Mutex<()>>,
@@ -54,8 +56,10 @@ impl AppState {
             .expect("Failed to create HTTP client");
 
         Self {
+            batch_handoff: Arc::default(),
             downloads: Arc::new(Mutex::new(HashMap::new())),
             download_store_lock: Arc::new(Mutex::new(())),
+            batch_creation_locks: std::array::from_fn(|_| Mutex::new(())),
             cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
             live_records: Arc::new(Mutex::new(HashMap::new())),
             live_store_lock: Arc::new(Mutex::new(())),

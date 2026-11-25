@@ -67,7 +67,86 @@ pub async fn create_download(
     state: State<'_, AppState>,
     params: CreateDownloadParams,
 ) -> Result<DownloadTaskSummary, AppError> {
-    let id = Uuid::new_v4().to_string();
+    create_download_with_id(app_handle, state.inner(), params, Uuid::new_v4().to_string()).await
+}
+
+#[tauri::command]
+pub async fn create_batch_download(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    request_id: String,
+    params: CreateDownloadParams,
+) -> Result<DownloadTaskSummary, AppError> {
+    let uuid = Uuid::parse_str(&request_id)
+        .ok()
+        .filter(|uuid| uuid.get_version_num() == 4)
+        .ok_or_else(|| AppError::InvalidInput("Invalid batch task ID".to_string()))?;
+    let id = uuid.to_string();
+    let slot = usize::from(uuid.as_bytes()[0]) % state.batch_creation_locks.len();
+    get_or_create_batch_task(
+        &state.batch_creation_locks[slot],
+        persistence::load_download_summary(&app_handle, &id),
+        create_download_with_id(app_handle.clone(), state.inner(), params, id.clone()),
+    )
+    .await
+}
+
+async fn get_or_create_batch_task<T>(
+    lock: &tokio::sync::Mutex<()>,
+    lookup: impl std::future::Future<Output = Result<Option<T>, AppError>>,
+    create: impl std::future::Future<Output = Result<T, AppError>>,
+) -> Result<T, AppError> {
+    let _creation = lock.lock().await;
+    match lookup.await? {
+        Some(task) => Ok(task),
+        None => create.await,
+    }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn concurrent_retries_reuse_the_committed_batch_task() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex;
+
+    let creation = Mutex::new(());
+    let persisted = Mutex::new(None);
+    let worker_starts = AtomicUsize::new(0);
+    let submit = || {
+        get_or_create_batch_task(
+            &creation,
+            async { Ok(*persisted.lock().await) },
+            async {
+                tokio::task::yield_now().await;
+                *persisted.lock().await = Some("task-id");
+                worker_starts.fetch_add(1, Ordering::Relaxed);
+                Ok("task-id")
+            },
+        )
+    };
+    let (first, duplicate) = tokio::join!(submit(), submit());
+    assert_eq!(first.unwrap(), "task-id");
+    assert_eq!(duplicate.unwrap(), "task-id");
+    assert_eq!(submit().await.unwrap(), "task-id");
+    assert_eq!(worker_starts.load(Ordering::Relaxed), 1);
+}
+
+async fn persist_new_download(
+    app_handle: &AppHandle,
+    state: &AppState,
+    task: &DownloadTask,
+) -> Result<(), AppError> {
+    persistence::insert_active_task(app_handle, task).await?;
+    state.downloads.lock().await.insert(task.id.clone(), task.clone());
+    Ok(())
+}
+
+async fn create_download_with_id(
+    app_handle: AppHandle,
+    state: &AppState,
+    params: CreateDownloadParams,
+    id: String,
+) -> Result<DownloadTaskSummary, AppError> {
     let client = state.http_client.read().await.clone();
     let request_headers = parse_request_headers(params.extra_headers.as_deref())?;
     let file_type = resolve_create_download_file_type(&params)?;
@@ -140,11 +219,7 @@ pub async fn create_download(
             file_path: None,
         };
 
-        {
-            let mut downloads = state.downloads.lock().await;
-            downloads.insert(id.clone(), task.clone());
-        }
-        persistence::save_task(&app_handle, &task).await?;
+        persist_new_download(&app_handle, state, &task).await?;
 
         start_mp4_download_worker(
             app_handle.clone(),
@@ -206,11 +281,7 @@ pub async fn create_download(
             file_path: Some(bundle_dir.clone()),
         };
 
-        {
-            let mut downloads = state.downloads.lock().await;
-            downloads.insert(id.clone(), task.clone());
-        }
-        persistence::save_task(&app_handle, &task).await?;
+        persist_new_download(&app_handle, state, &task).await?;
 
         start_hls_bundle_download_worker(
             app_handle.clone(),
@@ -267,11 +338,7 @@ pub async fn create_download(
                     file_path: None,
                 };
 
-                {
-                    let mut downloads = state.downloads.lock().await;
-                    downloads.insert(id.clone(), task.clone());
-                }
-                persistence::save_task(&app_handle, &task).await?;
+                persist_new_download(&app_handle, state, &task).await?;
 
                 start_download_worker(
                     app_handle.clone(),
@@ -326,11 +393,7 @@ pub async fn create_download(
                     file_path: Some(bundle_dir.clone()),
                 };
 
-                {
-                    let mut downloads = state.downloads.lock().await;
-                    downloads.insert(id.clone(), task.clone());
-                }
-                persistence::save_task(&app_handle, &task).await?;
+                persist_new_download(&app_handle, state, &task).await?;
 
                 start_hls_bundle_download_worker(
                     app_handle.clone(),

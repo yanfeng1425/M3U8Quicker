@@ -11,7 +11,7 @@
     "dev:desktop": "node .vscode/tauri-dev.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "test": "node --test scripts/test-i18n.mjs scripts/test-progress-events.mjs scripts/test-download-progress-batch.mjs",
+    "test": "node --test scripts/test-i18n.mjs scripts/test-progress-events.mjs scripts/test-download-progress-batch.mjs scripts/test-batch-task-center.mjs",
     "test:i18n": "node --test scripts/test-i18n.mjs",
     "preview": "vite preview",
     "tauri": "tauri"

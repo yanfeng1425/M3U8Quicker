@@ -2432,6 +2432,7 @@ dependencies = [
  "quick-xml",
  "rcgen",
  "reqwest 0.12.28",
+ "ring",
  "rustls",
  "semver",
  "serde",

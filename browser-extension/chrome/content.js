@@ -34,6 +34,9 @@
     zh: {
       title: "选择要下载的视频", selectAll: "全选", deselect: "不选", clear: "清空",
       batch: "批量下载", close: "关闭", empty: "暂无可下载视频",
+      batchSending: "正在发送到桌面端…",
+      batchTooLarge: "批次超过 500 条或 2 MiB，请分批提交。",
+      batchFailed: "桌面端未接收批次。请确认已打开新版应用，再重试。",
       preview: "预览", copy: "复制", copied: "已复制", failed: "失败",
       download: "下载", record: "录播", quality: "{name} 清晰度",
       selectVideo: "选择 {name}", defaultQuality: "默认清晰度", qualityNumber: "清晰度 {number}",
@@ -41,6 +44,9 @@
     en: {
       title: "Select videos to download", selectAll: "Select all", deselect: "Deselect", clear: "Clear",
       batch: "Download selected", close: "Close", empty: "No videos available",
+      batchSending: "Sending to the desktop app…",
+      batchTooLarge: "The batch exceeds 500 items or 2 MiB. Send smaller batches.",
+      batchFailed: "The desktop app did not accept the batch. Open the updated app and try again.",
       preview: "Preview", copy: "Copy", copied: "Copied", failed: "Failed",
       download: "Download", record: "Record", quality: "{name} quality",
       selectVideo: "Select {name}", defaultQuality: "Default quality", qualityNumber: "Quality {number}",
@@ -839,10 +845,14 @@
       panel.remove();
     });
 
+    const batchStatus = document.createElement("span");
+    batchStatus.setAttribute("role", "status");
+    batchStatus.style.fontSize = "12px";
+    let batchSending = false;
     const updateBatchButtonState = () => {
       const checkedCount = selectedUrls.size;
       batchButton.textContent = checkedCount > 0 ? `${t("batch")} (${checkedCount})` : t("batch");
-      batchButton.disabled = checkedCount === 0;
+      batchButton.disabled = checkedCount === 0 || batchSending;
       batchButton.style.opacity = checkedCount > 0 ? "1" : "0.45";
       batchButton.style.cursor = checkedCount > 0 ? "pointer" : "not-allowed";
     };
@@ -869,15 +879,30 @@
       clearDetectedTargets();
     });
 
-    batchButton.addEventListener("click", () => {
-      if (selectedUrls.size === 0) {
+    batchButton.addEventListener("click", async () => {
+      if (selectedUrls.size === 0 || batchSending) {
         return;
       }
 
-      openBatchDownloader(
-        panelItems.filter((item) => selectedUrls.has(item.selectionKey))
-      );
-      panel.remove();
+      batchSending = true;
+      batchButton.disabled = true;
+      batchStatus.textContent = t("batchSending");
+      let result;
+      try {
+        result = await openBatchDownloader(
+          panelItems.filter((item) => selectedUrls.has(item.selectionKey))
+        );
+      } catch {
+        result = false;
+      } finally {
+        batchSending = false;
+        updateBatchButtonState();
+      }
+      if (result === true) {
+        panel.remove();
+      } else {
+        batchStatus.textContent = t(result === "too-large" ? "batchTooLarge" : "batchFailed");
+      }
     });
 
     const languageSwitch = document.createElement("div");
@@ -918,6 +943,7 @@
     headerActions.appendChild(clearSelectionButton);
     headerActions.appendChild(clearListButton);
     headerActions.appendChild(batchButton);
+    headerActions.appendChild(batchStatus);
     panel.appendChild(header);
     panel.appendChild(headerActions);
 
@@ -1242,7 +1268,34 @@
       params.set("extra_headers", extraHeaders);
     }
 
-    window.location.href = `${APP_BATCH_DEEP_LINK_BASE_URL}?${params.toString()}`;
+    const legacy = APP_BATCH_DEEP_LINK_BASE_URL + "?" + params.toString();
+    if (legacy.length <= 1800) {
+      window.location.href = legacy;
+      return true;
+    }
+
+    const draft = {
+      items: items.map((item) => ({ input: item.batchUrl || item.url, file_type: item.fileType || null })),
+      extra_headers: extraHeaders || "",
+    };
+    if (draft.items.length > 500 || new TextEncoder().encode(JSON.stringify(draft)).byteLength > 2 * 1024 * 1024) {
+      return "too-large";
+    }
+    const randomHex = (length) => Array.from(
+      crypto.getRandomValues(new Uint8Array(length)),
+      (value) => value.toString(16).padStart(2, "0"),
+    ).join("");
+    const id = randomHex(16);
+    const key = randomHex(32);
+    const message = { type: "m3u8quicker:batch-handoff", id, key, draft };
+    const sent = new Promise((resolve) => {
+      chrome.runtime.sendMessage(message, (response) => {
+        resolve(!chrome.runtime.lastError && response?.accepted === true);
+      });
+    });
+    window.location.href = APP_BATCH_DEEP_LINK_BASE_URL + "?" +
+      new URLSearchParams({ version: "2", id, key }).toString();
+    return sent;
   }
 
   function buildTargetsWithUniqueNames(items) {

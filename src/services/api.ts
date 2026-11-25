@@ -39,6 +39,19 @@ export async function createDownload(
   return invoke<DownloadTaskSummary>("create_download", { params });
 }
 
+export function createBatchDownload(requestId: string, params: CreateDownloadParams) {
+  return invoke<DownloadTaskSummary>("create_batch_download", { requestId, params });
+}
+
+export interface BatchHandoffDraft {
+  items: Array<{ input: string; file_type: NonNullable<CreateDownloadParams["file_type"]> | null }>;
+  extra_headers: string;
+}
+
+export function awaitBatchHandoff(id: string, key: string) {
+  return invoke<BatchHandoffDraft>("await_batch_handoff", { id, key });
+}
+
 export async function inspectHlsTracks(
   params: InspectHlsTracksParams
 ): Promise<InspectHlsTracksResult> {

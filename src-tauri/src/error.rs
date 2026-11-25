@@ -215,13 +215,18 @@ mod tests {
             "https://{}/certificate_verify_failed",
             listener.local_addr().unwrap()
         );
-        drop(listener);
+        // Accept and close the socket so the TLS connection fails promptly on all platforms.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(2))
             .build()
             .unwrap();
         let error = client.get(&url).send().await.unwrap_err();
+        server.await.unwrap();
         assert_eq!(
             format_reqwest_error(&error),
             format!("failed to connect to {url}")

@@ -1,5 +1,5 @@
 import { t, useTranslation } from "../i18n";
-import { useEffect, useState, type Key } from "react";
+import { useEffect, useRef, useState, type Key } from "react";
 import {
   Alert,
   Button,
@@ -19,6 +19,7 @@ import {
 } from "@ant-design/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { newBatchRequestId, type BatchDownloadRequest, type BatchDownloadResult } from "../hooks/createDownloadBatch";
 import {
   closePreviewSession,
   createPreviewSession,
@@ -50,9 +51,12 @@ interface BatchDownloadModalProps {
   onClose: () => void;
   onOpenFfmpegSettings: () => void;
   onSubmit: (
-    paramsList: CreateDownloadParams[]
-  ) => Promise<Array<{ error?: unknown }>>;
+    requests: BatchDownloadRequest[],
+    onResult: (requestId: string, result: BatchDownloadResult) => void,
+  ) => Promise<void>;
 }
+
+type RowResult = BatchDownloadResult | { status: "submitting" };
 
 interface ParsedBatchItem {
   key: string;
@@ -84,6 +88,10 @@ export function BatchDownloadModal({
   const [extraHeaders, setExtraHeaders] = useState("");
   const [outputDir, setOutputDir] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const submitLock = useRef(false);
+  const requestIds = useRef(new Map<string, string>());
+  const [rowResults, setRowResults] = useState<Record<string, RowResult>>({});
+  const [hasSubmitted, setHasSubmitted] = useState(false);
   const [previewingKey, setPreviewingKey] = useState<string | null>(null);
   const [parsedItems, setParsedItems] = useState<ParsedBatchItem[]>([]);
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
@@ -93,7 +101,16 @@ export function BatchDownloadModal({
       return;
     }
 
-    void getDefaultDownloadDir().then(setOutputDir);
+    let current = true;
+    setOutputDir("");
+    void getDefaultDownloadDir().then((dir) => {
+      if (current) setOutputDir(dir);
+    }).catch(() => {
+      if (current) message.warning(t("unknownError"));
+    });
+    requestIds.current.clear();
+    setHasSubmitted(false);
+    setRowResults({});
     setRawInput(initialRawInput || "");
     setExtraHeaders(initialExtraHeaders || "");
     const nextItems = parseBatchInput(
@@ -103,6 +120,7 @@ export function BatchDownloadModal({
     );
     setParsedItems(nextItems);
     setSelectedRowKeys(nextItems.map((item) => item.key));
+    return () => { current = false; };
   }, [initialExtraHeaders, initialFileTypes, initialRawInput, open, resetKey]);
 
   useEffect(() => {
@@ -113,8 +131,10 @@ export function BatchDownloadModal({
 
   const selectedKeySet = new Set(selectedRowKeys);
   const selectedItems = parsedItems.filter((item) => selectedKeySet.has(item.key));
-  const validItems = selectedItems.filter((item) => item.valid);
+  const validItems = selectedItems.filter((item) => item.valid && !rowResults[item.key]);
   const invalidItems = selectedItems.filter((item) => !item.valid);
+  const failedItems = parsedItems.filter((item) => item.valid && rowResults[item.key]?.status === "failed");
+  const isRowLocked = (key: string) => submitting || rowResults[key]?.status === "queued";
 
   const handleSelectDir = async () => {
     const selected = await openDialog({
@@ -246,66 +266,50 @@ export function BatchDownloadModal({
     }
   };
 
-  const handleSubmit = async () => {
-    if (validItems.length === 0) {
-      message.warning(t("selectAtLeastOneValidDownloadUrl"));
-      return;
-    }
-
-    if (invalidItems.length > 0) {
-      message.error(t("someLinesCouldNotBeParsedFixThemBeforeStarting"));
-      return;
-    }
-
+  const handleSubmit = async (items: ParsedBatchItem[]) => {
+    if (submitLock.current || items.length === 0) return;
+    submitLock.current = true;
     setSubmitting(true);
-    const failed: Array<{ item: ParsedBatchItem; error: string }> = [];
-
+    setHasSubmitted(true);
+    const keysByRequest = new Map<string, string>();
     try {
-      const submitResults = await onSubmit(
-        validItems.map((item) => ({
-          url:
-            item.sourceKind === "inline_dash_json"
-              ? INLINE_DASH_JSON_PLACEHOLDER_URL
-              : item.url,
-          filename: item.filename || undefined,
-          output_dir: outputDir || undefined,
-          extra_headers: extraHeaders.trim() || undefined,
-          download_mode: item.mode,
-          file_type: item.fileType,
-          source_kind: item.sourceKind,
-          source_text: item.sourceText,
-        }))
-      );
-
-      submitResults.forEach((result, index) => {
-        if (!result?.error) {
-          return;
-        }
-
-        const item = validItems[index];
-        if (item) {
-          failed.push({
-            item,
-            error: formatBatchCreateError(result.error),
-          });
-        }
+      const requests = items.map((item) => {
+        const requestId = requestIds.current.get(item.key) ?? newBatchRequestId();
+        requestIds.current.set(item.key, requestId);
+        keysByRequest.set(requestId, item.key);
+        return {
+          requestId,
+          params: {
+            url: item.sourceKind === "inline_dash_json" ? INLINE_DASH_JSON_PLACEHOLDER_URL : item.url,
+            filename: item.filename || undefined,
+            output_dir: outputDir || undefined,
+            extra_headers: extraHeaders.trim() || undefined,
+            download_mode: item.mode,
+            file_type: item.fileType,
+            source_kind: item.sourceKind,
+            source_text: item.sourceText,
+          },
+        };
       });
-
-      if (failed.length === 0) {
-        message.success(t("addedDownloadTasks", { value0: validItems.length }));
-        onClose();
-        return;
-      }
-
-      if (failed.length === validItems.length) {
-        message.error(t("failedToCreateBatchDownloads", { value0: failed[0]?.error ?? t("unknownError") }));
-        return;
-      }
-
-      message.warning(
-        t("addedTasksFailed", { value0: validItems.length - failed.length, value1: failed.length })
-      );
+      setRowResults((previous) => {
+        const next = { ...previous };
+        for (const item of items) next[item.key] = { status: "submitting" };
+        return next;
+      });
+      await onSubmit(requests, (requestId, result) => {
+        const key = keysByRequest.get(requestId);
+        if (key) setRowResults((previous) => ({ ...previous, [key]: result }));
+      });
+    } catch (error) {
+      setRowResults((previous) => {
+        const next = { ...previous };
+        for (const item of items) {
+          if (next[item.key]?.status !== "queued") next[item.key] = { status: "failed", error };
+        }
+        return next;
+      });
     } finally {
+      submitLock.current = false;
       setSubmitting(false);
     }
   };
@@ -314,10 +318,13 @@ export function BatchDownloadModal({
     <Modal
       title={t("batchDownload")}
       open={open}
-      onCancel={onClose}
+      onCancel={() => { if (!submitLock.current) onClose(); }}
+      closable={!submitting}
+      keyboard={!submitting}
+      maskClosable={!submitting}
       footer={null}
       destroyOnClose
-      width={700}
+      width={900}
     >
       <Space direction="vertical" size={16} style={{ width: "100%" }}>
         <div>
@@ -327,6 +334,7 @@ export function BatchDownloadModal({
           <TextArea
             rows={5}
             value={rawInput}
+            disabled={hasSubmitted || submitting}
             onChange={(event) => setRawInput(event.target.value)}
             placeholder={[
               "https://example.com/a.m3u8",
@@ -356,6 +364,9 @@ export function BatchDownloadModal({
                 rowSelection={{
                   selectedRowKeys,
                   onChange: setSelectedRowKeys,
+                  getCheckboxProps: (record) => ({
+                    disabled: submitting || Boolean(rowResults[record.key]),
+                  }),
                 }}
                 scroll={{ y: 200 }}
                 columns={[
@@ -379,6 +390,7 @@ export function BatchDownloadModal({
                         <Select
                           size="small"
                           value={record.mode}
+                          disabled={isRowLocked(record.key)}
                           options={[
                             { value: "hls", label: "HLS" },
                             { value: "dash", label: "DASH" },
@@ -400,7 +412,7 @@ export function BatchDownloadModal({
                     dataIndex: "url",
                     ellipsis: true,
                     render: (value: string, record) => {
-                      if (record.sourceKind === "inline_dash_json") {
+                      if (record.sourceKind === "inline_dash_json" && record.valid && !rowResults[record.key]) {
                         return (
                           <Typography.Text type="secondary">
                             {INLINE_DASH_JSON_DISPLAY()}
@@ -412,14 +424,27 @@ export function BatchDownloadModal({
                           <Input
                             size="small"
                             value={value}
+                            disabled={isRowLocked(record.key)}
                             onChange={(event) => {
                               const nextUrl = event.target.value;
-                              updateParsedItem(record.key, (current) => ({
-                                url: nextUrl,
-                                filename: current.filenameEdited
-                                  ? current.filename
-                                  : deriveFilenameFromUrl(nextUrl) || undefined,
-                              }));
+                              updateParsedItem(record.key, (current) => {
+                                if (current.sourceKind === "inline_dash_json" || nextUrl.trim().startsWith("{")) {
+                                  const reparsed = parseBatchLine(nextUrl, current.lineNumber);
+                                  return {
+                                    ...reparsed,
+                                    sourceKind: reparsed.sourceKind,
+                                    sourceText: reparsed.sourceText,
+                                    filename: current.filenameEdited ? current.filename : reparsed.filename,
+                                    filenameEdited: current.filenameEdited,
+                                  };
+                                }
+                                return {
+                                  url: nextUrl,
+                                  filename: current.filenameEdited
+                                    ? current.filename
+                                    : deriveFilenameFromUrl(nextUrl) || undefined,
+                                };
+                              });
                             }}
                           />
                           {!record.valid ? (
@@ -438,6 +463,7 @@ export function BatchDownloadModal({
                       <Input
                         size="small"
                         value={value ?? ""}
+                        disabled={isRowLocked(record.key)}
                         placeholder={t("automatic")}
                         onChange={(event) =>
                           updateParsedItem(record.key, {
@@ -447,6 +473,27 @@ export function BatchDownloadModal({
                         }
                       />
                     ),
+                  },
+                  {
+                    title: t("status"),
+                    key: "batchStatus",
+                    width: 145,
+                    render: (_, record) => {
+                        if (!record.valid) return <Typography.Text type="danger" title={record.error}>{t("batchInvalid")}</Typography.Text>;
+                      const result = rowResults[record.key];
+                      switch (result?.status) {
+                        case "queued":
+                          return <Typography.Text type="success" title={result.task.id}>{t("batchQueued")}</Typography.Text>;
+                        case "failed": {
+                          const error = formatBatchCreateError(result.error);
+                          return <Typography.Text type="danger" title={error} ellipsis={{ tooltip: error }}>{t("batchFailed")}: {error}</Typography.Text>;
+                        }
+                        case "submitting":
+                          return t("batchSubmitting");
+                        default:
+                          return t("batchReady");
+                      }
+                    },
                   },
                   {
                     title: t("actions"),
@@ -462,7 +509,7 @@ export function BatchDownloadModal({
                           title={t("preview")}
                           aria-label={t("previewThisVideo")}
                           loading={previewingKey === record.key}
-                          disabled={!record.valid}
+                          disabled={submitting || !record.valid}
                           onClick={() => void handlePreviewItem(record)}
                         />
                         <Button
@@ -472,6 +519,7 @@ export function BatchDownloadModal({
                           icon={<DeleteOutlined />}
                           title={t("delete")}
                           aria-label={t("deleteThisRow")}
+                          disabled={hasSubmitted || submitting}
                           onClick={() => handleDeleteItem(record)}
                         />
                       </Space>
@@ -502,6 +550,7 @@ export function BatchDownloadModal({
             <TextArea
               rows={3}
               value={extraHeaders}
+              disabled={submitting}
               onChange={(event) => setExtraHeaders(event.target.value)}
               placeholder={
                 t("oneHeaderPerLineRefererHttpsExampleComOriginHttps")
@@ -515,7 +564,7 @@ export function BatchDownloadModal({
           <div style={{ marginTop: 8 }}>
             <Space.Compact style={{ width: "100%" }}>
               <Input value={outputDir} readOnly style={{ flex: 1 }} />
-              <Button icon={<FolderOpenOutlined />} onClick={handleSelectDir}>
+              <Button icon={<FolderOpenOutlined />} disabled={submitting} onClick={handleSelectDir}>
                 {t("browse")}</Button>
             </Space.Compact>
           </div>
@@ -523,12 +572,17 @@ export function BatchDownloadModal({
 
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
           <Space>
-            <Button onClick={onClose}>{t("cancel")}</Button>
+            <Button disabled={submitting} onClick={onClose}>{hasSubmitted ? t("close") : t("cancel")}</Button>
+            {failedItems.length > 0 && (
+              <Button disabled={submitting} onClick={() => void handleSubmit(failedItems)}>
+                {t("batchRetryFailed")}
+              </Button>
+            )}
             <Button
               type="primary"
-              onClick={() => void handleSubmit()}
+              onClick={() => void handleSubmit(validItems)}
               loading={submitting}
-              disabled={selectedItems.length === 0}
+              disabled={validItems.length === 0}
             >
               {t("startBatchDownload")}</Button>
           </Space>
@@ -632,7 +686,7 @@ function deriveFilenameFromInlineDashJson(raw: string): string | undefined {
     if (typeof parsed.title === "string") {
       const sanitized = parsed.title
         // eslint-disable-next-line no-control-regex
-        .replace(/[<>:"/\\|?* -]/g, "_")
+        .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
         .trim();
       if (sanitized) {
         return sanitized.endsWith(".mp4") ? sanitized : `${sanitized}.mp4`;
@@ -657,6 +711,11 @@ function normalizeParsedItem(item: ParsedBatchItem): ParsedBatchItem {
   }
 
   if (item.sourceKind === "inline_dash_json") {
+    try {
+      JSON.parse(url);
+    } catch {
+      return { ...item, url, valid: false, error: t("batchInvalidJson") };
+    }
     return {
       ...item,
       url,

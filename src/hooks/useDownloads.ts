@@ -1,6 +1,7 @@
 import { t, useTranslation } from "../i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDownloadProgress } from "./useDownloadProgress";
+import { createDownloadBatch, type BatchDownloadRequest, type BatchDownloadResult } from "./createDownloadBatch";
 import { message, Modal } from "antd";
 import type {
   CreateDownloadParams,
@@ -14,18 +15,12 @@ import type {
 import * as api from "../services/api";
 
 const DEFAULT_PAGE_SIZE = 50;
-const BATCH_CREATE_CONCURRENCY = 3;
 
 interface PageState {
   items: DownloadTaskSummary[];
   total: number;
   page: number;
   pageSize: number;
-}
-
-interface BatchAddDownloadResult {
-  task?: DownloadTaskSummary;
-  error?: unknown;
 }
 
 const INITIAL_PAGE_STATE: PageState = {
@@ -236,42 +231,20 @@ export function useDownloads(historyPageSize = DEFAULT_PAGE_SIZE) {
   }, [refreshCounts, refreshGroup]);
 
   const addDownloadsBatch = useCallback(
-    async (paramsList: CreateDownloadParams[]): Promise<BatchAddDownloadResult[]> => {
-      const results: BatchAddDownloadResult[] = Array.from(
-        { length: paramsList.length },
-        () => ({})
+    async (
+      requests: BatchDownloadRequest[],
+      onResult: (requestId: string, result: BatchDownloadResult) => void,
+    ): Promise<void> => {
+      const queued = await createDownloadBatch(
+        requests,
+        ({ requestId, params }) => api.createBatchDownload(requestId, params),
+        onResult,
       );
-      let nextIndex = 0;
-      let successCount = 0;
-
-      const workerCount = Math.min(BATCH_CREATE_CONCURRENCY, paramsList.length);
-      const workers = Array.from({ length: workerCount }, async () => {
-        while (true) {
-          const currentIndex = nextIndex;
-          nextIndex += 1;
-
-          if (currentIndex >= paramsList.length) {
-            return;
-          }
-
-          try {
-            const task = await api.createDownload(paramsList[currentIndex]);
-            results[currentIndex] = { task };
-            successCount += 1;
-          } catch (error) {
-            results[currentIndex] = { error };
-          }
-        }
-      });
-
-      await Promise.all(workers);
-
-      if (successCount > 0) {
-        await refreshCounts();
-        await refreshGroup("active", 1);
+      if (queued === 0) return;
+      const refreshResults = await Promise.allSettled([refreshCounts(), refreshGroup("active", 1)]);
+      if (refreshResults.some((result) => result.status === "rejected")) {
+        message.warning(t("batchListRefreshFailed"));
       }
-
-      return results;
     },
     [refreshCounts, refreshGroup]
   );

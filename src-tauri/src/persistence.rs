@@ -514,6 +514,64 @@ pub async fn get_downloads_page(
     })
 }
 
+pub async fn insert_active_task(
+    app_handle: &tauri::AppHandle,
+    task: &DownloadTask,
+) -> Result<(), AppError> {
+    let store_lock = app_handle.state::<AppState>().download_store_lock.clone();
+    let _guard = store_lock.lock().await;
+    ensure_store_ready_locked(app_handle).await?;
+
+    let summary = task_to_summary(task);
+    let detail_path = task_file(app_handle, &summary.id);
+    let mut active = read_index_locked(app_handle, DownloadGroup::Active).await?;
+    active.push(summary);
+    sort_summaries_desc(&mut active);
+    commit_new_active_task(
+        &detail_path,
+        &index_file(app_handle, DownloadGroup::Active),
+        &task_to_detail(task),
+        &active,
+    )
+    .await
+}
+
+async fn commit_new_active_task(
+    detail_path: &Path,
+    active_index: &Path,
+    detail: &DownloadTaskDetail,
+    active: &[DownloadTaskSummary],
+) -> Result<(), AppError> {
+    write_json_atomic(detail_path, detail).await?;
+    if let Err(error) = write_json_atomic(active_index, &active).await {
+        let _ = remove_file_if_exists(detail_path).await;
+        let _ = remove_file_if_exists(&active_index.with_extension("tmp")).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn failed_initial_index_write_can_retry_with_the_same_task_path() {
+    let root = std::env::temp_dir().join(format!("m3u8quicker-index-test-{}", uuid::Uuid::new_v4()));
+    let index = root.join("active.json");
+    let detail = root.join("task.json");
+    tokio::fs::create_dir_all(&index).await.unwrap();
+    assert!(commit_new_active_task(&detail, &index, &DownloadTaskDetail::default(), &[]).await.is_err());
+    assert!(!detail.exists());
+    assert!(!index.with_extension("tmp").exists());
+    tokio::fs::remove_dir(&index).await.unwrap();
+    commit_new_active_task(&detail, &index, &DownloadTaskDetail::default(), &[])
+        .await
+        .unwrap();
+    assert!(detail.is_file());
+    assert!(index.is_file());
+    tokio::fs::remove_file(&detail).await.unwrap();
+    tokio::fs::remove_file(&index).await.unwrap();
+    tokio::fs::remove_dir(&root).await.unwrap();
+}
+
 pub async fn save_task(
     app_handle: &tauri::AppHandle,
     task: &DownloadTask,

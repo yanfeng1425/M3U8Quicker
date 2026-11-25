@@ -1,3 +1,4 @@
+mod batch_handoff;
 mod commands;
 mod downloader;
 mod error;
@@ -432,6 +433,8 @@ pub fn run() {
             commands::inspect_hls_tracks,
             commands::inspect_dash_tracks,
             commands::create_download,
+            commands::create_batch_download,
+            batch_handoff::await_batch_handoff,
             commands::pause_download,
             commands::check_resume_download,
             commands::resume_download,

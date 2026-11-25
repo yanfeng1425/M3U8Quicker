@@ -46,6 +46,7 @@ import {
   getFfmpegStatus,
   checkForUpdate,
   convertLiveRecordToMp4,
+  awaitBatchHandoff,
 } from "./services/api";
 import type {
   ChromiumBrowser,
@@ -86,6 +87,8 @@ interface BatchDownloadDraft {
   fileTypes?: Array<import("./types").FileType | undefined>;
   nonce: number;
 }
+
+let nextBatchDraftNonce = 0;
 
 interface AppProps {
   themeMode: ThemeMode;
@@ -142,7 +145,8 @@ function App({
   const [activeTool, setActiveTool] = useState<ToolAction | null>(null);
   const [toolInputPath, setToolInputPath] = useState<string | undefined>();
   const [downloadDraft, setDownloadDraft] = useState<DownloadDraft | null>(null);
-  const [batchDownloadDraft, setBatchDownloadDraft] = useState<BatchDownloadDraft | null>(null);
+  const [batchDrafts, setBatchDrafts] = useState<BatchDownloadDraft[]>([]);
+  const batchDownloadDraft = batchDrafts[0];
   const [liveRecordDraft, setLiveRecordDraft] = useState<{
     url: string;
     extraHeaders?: string;
@@ -150,7 +154,6 @@ function App({
     outputDir?: string;
     nonce: number;
   } | null>(null);
-  const [batchDownloadModalOpen, setBatchDownloadModalOpen] = useState(false);
   const [videoPreviewModalOpen, setVideoPreviewModalOpen] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [updateNotificationsEnabled, setUpdateNotificationsEnabled] = useState(
@@ -284,7 +287,8 @@ function App({
 
   useEffect(() => {
     const openDraftFromDeepLink = (deepLink: string) => {
-      if (!shouldHandleDeepLink(deepLink)) {
+      const handoff = parseBatchHandoffLink(deepLink);
+      if (!shouldHandleDeepLink(handoff ? `batch-handoff:${handoff.id}` : deepLink)) {
         return;
       }
 
@@ -324,17 +328,31 @@ function App({
         return;
       }
 
+      if (handoff) {
+        void bringMainWindowToFront();
+        void awaitBatchHandoff(handoff.id, handoff.key).then((draft) => {
+          const batchDraft = {
+            rawInput: draft.items.map((item) => item.input).join("\n"),
+            fileTypes: draft.items.map((item) => item.file_type ?? undefined),
+            extraHeaders: draft.extra_headers,
+            nonce: ++nextBatchDraftNonce,
+          };
+          setBatchDrafts((drafts) => [...drafts, batchDraft]);
+        }).catch((error: unknown) => {
+          if (error === "duplicate") return;
+          message.error(t(error === "port_unavailable" ? "batchHandoffPortUnavailable" : "batchHandoffFailed"));
+        });
+        return;
+      }
+
       const batchDraft = parseBatchDownloadDraft(deepLink);
       if (!batchDraft) {
         return;
       }
 
       void bringMainWindowToFront();
-      setBatchDownloadDraft({
-        ...batchDraft,
-        nonce: Date.now(),
-      });
-      setBatchDownloadModalOpen(true);
+      const draft = { ...batchDraft, nonce: ++nextBatchDraftNonce };
+      setBatchDrafts((drafts) => [...drafts, draft]);
     };
 
     deepLinkHandlers.add(openDraftFromDeepLink);
@@ -899,8 +917,8 @@ function App({
             setModalOpen(true);
           }}
           onOpenBatchDownload={() => {
-            setBatchDownloadDraft(null);
-            setBatchDownloadModalOpen(true);
+            const draft = { rawInput: "", nonce: ++nextBatchDraftNonce };
+            setBatchDrafts((drafts) => drafts.length ? drafts : [draft]);
           }}
           onOpenVideoPreview={() => setVideoPreviewModalOpen(true)}
           onOpenLiveRecord={() => setLiveRecordModalOpen(true)}
@@ -984,22 +1002,19 @@ function App({
         }}
       />
       <BatchDownloadModal
-        open={batchDownloadModalOpen}
+        open={Boolean(batchDownloadDraft)}
         initialRawInput={batchDownloadDraft?.rawInput}
         initialExtraHeaders={batchDownloadDraft?.extraHeaders}
         initialFileTypes={batchDownloadDraft?.fileTypes}
         resetKey={batchDownloadDraft?.nonce ?? 0}
         onClose={() => {
-          setBatchDownloadModalOpen(false);
-          setBatchDownloadDraft(null);
+          setBatchDrafts((drafts) => drafts.slice(1));
         }}
         onOpenFfmpegSettings={() => {
           setSettingsInitialTab("ffmpeg");
           setSettingsOpen(true);
         }}
-        onSubmit={async (paramsList) => {
-          return addDownloadsBatch(paramsList);
-        }}
+        onSubmit={addDownloadsBatch}
       />
       <VideoPreviewModal
         open={videoPreviewModalOpen}
@@ -1799,8 +1814,20 @@ function parseBatchDownloadDraft(
       ? rawFileTypes.split(/\r?\n/).map((value) => parseFileType(value))
       : undefined;
     return { rawInput, extraHeaders, fileTypes };
-  } catch (error) {
-    console.debug("[m3u8quicker] failed to parse batch deep link", deepLink, error);
+  } catch {
+    return null;
+  }
+}
+
+function parseBatchHandoffLink(deepLink: string): { id: string; key: string } | null {
+  try {
+    const parsed = new URL(deepLink);
+    if (parsed.protocol !== "m3u8quicker:" || parsed.hostname !== "batch-download" ||
+        parsed.searchParams.get("version") !== "2") return null;
+    const id = parsed.searchParams.get("id") ?? "";
+    const key = parsed.searchParams.get("key") ?? "";
+    return /^[a-f\d]{32}$/.test(id) && /^[a-f\d]{64}$/.test(key) ? { id, key } : null;
+  } catch {
     return null;
   }
 }

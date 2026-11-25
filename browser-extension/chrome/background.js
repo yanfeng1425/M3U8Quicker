@@ -1,3 +1,60 @@
+async function sendBatchHandoff({ id, key, draft }) {
+  if (!/^[a-f0-9]{32}$/.test(id) || !/^[a-f0-9]{64}$/.test(key) ||
+      !Array.isArray(draft?.items) || draft.items.length < 1 || draft.items.length > 500) {
+    return false;
+  }
+  const encoder = new TextEncoder();
+  const context = (kind) => encoder.encode("m3u8quicker-batch-v2:" + id + ":" + kind);
+  const data = encoder.encode(JSON.stringify(draft));
+  if (data.byteLength > 2 * 1024 * 1024) return false;
+  const keyBytes = Uint8Array.from(key.match(/../g), (value) => Number.parseInt(value, 16));
+  const secret = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt", "decrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt({
+    name: "AES-GCM", iv, additionalData: context("payload"),
+  }, secret, data);
+  const packet = new Uint8Array(iv.length + encrypted.byteLength);
+  packet.set(iv);
+  packet.set(new Uint8Array(encrypted), iv.length);
+
+  const endpoint = "http://127.0.0.1:47873/batch/v2/" + id;
+  const deadline = Date.now() + 25_000;
+  let delay = 250;
+  while (Date.now() < deadline) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.min(2000, deadline - Date.now()));
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        credentials: "omit",
+        cache: "no-store",
+        redirect: "error",
+        signal: controller.signal,
+        body: packet,
+      });
+      if (response.status === 200) {
+        if (response.headers.get("Content-Length") !== "36") return false;
+        const receipt = new Uint8Array(await response.arrayBuffer());
+        if (receipt.byteLength !== 36) return false;
+        const opened = await crypto.subtle.decrypt({
+          name: "AES-GCM", iv: receipt.slice(0, 12), additionalData: context("receipt"),
+        }, secret, receipt.slice(12));
+        return new TextDecoder().decode(opened) === "accepted";
+      }
+      if (response.status !== 404 && response.status !== 503) return false;
+    } catch {
+      // The desktop process may still be starting.
+    } finally {
+      clearTimeout(timer);
+    }
+    const remaining = deadline - Date.now();
+    if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(delay, remaining)));
+    delay = Math.min(2000, delay * 2);
+  }
+  return false;
+}
+
 const BACKGROUND_DETECT_MESSAGE = "m3u8quicker:network-detected";
 const FRAME_DETECT_MESSAGE = "m3u8quicker:frame-detected";
 const SYNC_DETECTIONS_MESSAGE = "m3u8quicker:sync-detections";
@@ -26,6 +83,14 @@ chrome.webRequest.onBeforeRequest.addListener(
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message !== "object") {
     return;
+  }
+
+  if (message.type === "m3u8quicker:batch-handoff" && sender.tab?.id >= 0) {
+    void sendBatchHandoff(message).then(
+      (accepted) => sendResponse({ accepted }),
+      () => sendResponse({ accepted: false }),
+    );
+    return true;
   }
 
   if (message.type === FRAME_DETECT_MESSAGE && sender.tab?.id >= 0) {
